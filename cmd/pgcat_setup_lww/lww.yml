@@ -1,0 +1,21 @@
+host: 127.0.0.1
+port: 5432
+user: tmp
+password: tmp
+databases:
+  - name: tmp
+    tables:
+      - name: public.foobar
+        IndividualCols: [col1, col2]
+        CounterCols: [col3]
+---
+host: 127.0.0.1
+port: 5433
+user: tmp
+password: tmp
+databases:
+  - name: tmp
+    tables:
+      - name: foobar
+        IndividualCols: [col1, col2]
+        CounterCols: [col3]
