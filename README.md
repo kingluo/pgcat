@@ -60,6 +60,8 @@ git build-rpm
 ### Build pgcat-pgxs
 
 ```
+git clone https://github.com/kingluo/pgcat-pgxs
+cd pgcat-pgxs
 export PATH=$PATH:/usr/pgsql-11/bin/
 git build-rpm
 # check generated rpm, e.g. pgcat-pgxs-0.1-11562916936.el7.x86_64.rpm
