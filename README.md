@@ -279,3 +279,73 @@ not use `instead of` trigger on view, please use view rule instead.
 has no way to set `always` role on the view `instead of` trigger.
 On the other hand, pgcat sets its role to `replica`, so `instead of`
 trigger would not be called, and then `copy to` view would be no-op.
+
+## Conflict resolution
+
+Conflict resolution is necessary for logical replication.
+
+Logical replication is normally used for loose-coupling different pg deployments
+(or different pg HA deployments, one HA deployment consists of one master and
+multiple slaves, where they are connected via physical replication),
+especially for different data centers, where does no require
+real-time data consistence).
+
+For example, we have two groups of pg:
+
+pg1 consists of pg1-master and pg1-slave, run in datacenter1.
+
+pg2 consists of pg2-master, pg2-slave1 and pg2-slave2, run in datacenter2.
+
+They replicate data changes to each other, but not in real time, and the
+network between data centers may be broken for time to time.
+
+Each data center changes data independently, which would normally involves data
+with same identity, e.g. same primary key. Such data needs some sort of policy
+to keep consistent in both data centers.
+
+For example, pg1 writes "foo" to row foo, before this change is applied to pg2,
+pg2 writes "bar" to row foo. Then which would be the final version of value?
+
+### lww (Last-writer-win)
+
+Similar to Cassandra, it could use write timestamp to resolve the conflict.
+The write with latest timestamp would be the last version of data value. The
+pg deployment would keep time in sync, e.g. via NTP.
+
+The `pgcat_setup_lww` command is used to setup the table for used by lww. Note
+that conflict resolution is optional, so if you're sure the data changes are
+consistent by nature or by design, you do not need to run this command on your
+tables.
+
+How does it work?
+
+It would category the columns as:
+* Inline columns
+Inline columns have the same timestamp as the row.
+* Individual columns
+Individual columns have their own timestamp associated.
+* Counter columns
+Each pg deployment would have their own individual copy of counter value. But
+when you read it, it would sum up all copys as the final value.
+
+When you run `pgcat_setup_lww`, it would:
+
+* Add a new column `__pgcat_lww` to the target table, which
+is in `jsonb` type, used to record the meta info of the row and columns.
+* for existing rows, it would populate `__pgcat_lww` concurrently (i.e. would
+not block concurrent data r/w when the table setup is processing).
+* Create a trigger, which would
+	* for local change, get the current timestamp as the row timestamp
+	* for remote change, get the row timestamp in `__pgcat_lww`
+	* for inline columns, compare the row timestamp
+	* for each individual column, compare its own timestamp
+	* for counter column, store the remote change in `__pgcat_lww`, use
+	system identifier from `pg_control_system()` to identify different
+	remote peers
+* Create a view to filter the `__pgcat_lww` so that it would not exported
+to application level
+* Create an helper function `pgcat_lww_counter()` used to sum up counter column
+* When you delete a row, it would not really delete it, instead, it would be
+marked as tombstone in `__pgcat_lww`, so `pgcat_setup_lww` would create index
+for tombstone rows and create a helper function to vacuum them whenever you need,
+e.g. remove tombstones older than 3 days.
