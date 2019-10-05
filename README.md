@@ -342,10 +342,14 @@ not block concurrent data r/w when the table setup is processing).
 	* for counter column, store the remote change in `__pgcat_lww`, use
 	system identifier from `pg_control_system()` to identify different
 	remote peers
-* Create a view to filter the `__pgcat_lww` so that it would not exported
-to application level
-* Create an helper function `pgcat_lww_counter()` used to sum up counter column
-* When you delete a row, it would not really delete it, instead, it would be
+* Create a view to filter the `__pgcat_lww` so that it would not be exported
+to application level. For example, if you have table `foobar`,
+then it would create a view `foobar_pgcat_lww_view`.
+* Create a helper function `pgcat_lww_counter()` used to sum up counter column.
+You could call `pgcat_lww_counter(__pgcat_lww, 'foobar')` to
+get the value of column `foobar`.
+* When you delete a row, it would not be really deleted, instead, it would be
 marked as tombstone in `__pgcat_lww`, so `pgcat_setup_lww` would create index
 for tombstone rows and create a helper function to vacuum them whenever you need,
-e.g. remove tombstones older than 3 days.
+e.g. remove tombstones older than 3 days:
+`foobar_pgcat_lww_vaccum(interval '3 days') `.

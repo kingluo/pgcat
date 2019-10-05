@@ -1,8 +1,0 @@
-host: 127.0.0.1
-port: 5433
-password: pgcat
-databases:
-  - tmp
-loglevel: debug
-#logfile: pgcat.log
-max_sync_workers: 1
