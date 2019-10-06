@@ -160,6 +160,32 @@ cp -a /usr/share/pgcat/pgcat.yml .
 pgcat -c pgcat.yml
 ```
 
+pgcat uses golang proxy dialer, so if you need to access your database via proxy, you could run below command:
+
+```bash
+all_proxy=socks5h://127.0.0.1:20000 pgcat -c pgcat.yml
+```
+
+If you need to run pgcat in daemon on Linux, just use `setsid` command:
+
+```bash
+setsid pgcat -c pgcat.yml &>/dev/null
+```
+
+**Admin HTTP API**:
+
+If you configure `admin_listen_address`, e.g. `admin_listen_address: 127.0.0.1:30000`,
+then you could run below commands to admin the pgcat process:
+
+```bash
+# rotate the log file
+# you could use logrotate to rotate pgcat log files as you need
+curl http://127.0.0.1:30000/rotate
+
+# reload the yaml config file, e.g. you could add new databases to replicate
+curl http://127.0.0.1:30000/reload
+```
+
 ### Setup the table
 
 #### Grant pgcat
