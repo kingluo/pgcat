@@ -161,6 +161,52 @@ pg_ctl restart
 
 ## Run
 
+### Setup the table
+
+#### Grant pgcat
+
+On subscriber database, pgcat needs to read/write the table.
+
+```sql
+grant select,insert,update,delete,truncate on foobar to pgcat;
+```
+
+If you configure to copy the table in the subscription, then
+on publisher database, pgcat needs to select the table.
+
+```sql
+grant select on foobar to pgcat;
+```
+
+#### Setup publication
+
+On publisher database:
+
+```sql
+CREATE PUBLICATION foobar FOR TABLE foobar;
+alter publication foobar add table foobar;
+```
+
+#### Setup lww (optional)
+
+If you need last-writer-win conflict resolution, then run `pgcat_setup_lww` on all pg instances.
+
+```
+pgcat_setup_lww -c lww.yml
+```
+
+Check /usr/share/pgcat/lww.yml for configuration file example.
+
+#### Setup subscription
+
+```sql
+INSERT INTO pgcat.pgcat_subscription(name, hostname, port, username, password,
+dbname, publications, copy_data, enabled) VALUES ('foobar', '127.0.0.1', 5433,
+'pgcat', 'pgcat', 'tmp', '{foobar}', true, true);
+```
+
+The pgcat would check `pgcat_subscription`, if it changes, pgcat would apply the changes.
+
 ### Run pgcat
 
 ```bash
@@ -196,52 +242,6 @@ curl http://127.0.0.1:30000/rotate
 # reload the yaml config file, e.g. you could add new databases to replicate
 curl http://127.0.0.1:30000/reload
 ```
-
-### Setup the table
-
-#### Grant pgcat
-
-On subscriber database, pgcat needs to read/write the table.
-
-```sql
-grant select,insert,update,delete,truncate on foobar to pgcat;
-```
-
-If you configure to copy the table in the subscription, then
-on publisher database, pgcat needs to select the table.
-
-```sql
-grant select on foobar to pgcat;
-```
-
-#### Setup publication
-
-On publisher database:
-
-```sql
-CREATE PUBLICATION foobar FOR TABLE foobar;
-alter publication foobar add table foobar;
-```
-
-#### Setup lww (optional)
-
-If you need last-writer-win conflict resolution, then
-
-```
-pgcat_setup_lww -c lww.yml
-```
-
-Check /usr/share/pgcat/lww.yml for configuration file example.
-
-#### Setup subscription
-
-```sql
-INSERT INTO pgcat.pgcat_subscription(name, hostname, port, username, password,
-dbname, publications, copy_data, enabled) VALUES ('foobar', '127.0.0.1', 5433,
-'pgcat', 'pgcat', 'tmp', '{foobar}', true, true);
-```
-
-Then pgcat would start to run your subscription.
 
 ## Conflict handling
 
