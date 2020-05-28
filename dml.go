@@ -2,9 +2,9 @@ package pgcat
 
 import (
 	"bytes"
+	"context"
 	"strings"
 
-	"github.com/jackc/pgx"
 	"github.com/kyleconroy/pgoutput"
 	"github.com/lib/pq"
 )
@@ -168,10 +168,10 @@ func (state *applyState) handleDML(msg *pgoutput.Message) {
 	sql := tpl.String()
 
 	state.Debug(sql)
-	_, err := state.applyTx.Exec(sql)
+	_, err := state.applyTx.Exec(context.Background(), sql)
 	if err != nil {
 		state.Panicf("dml failed, commit_lsn=%s, err=%+v",
-			pgx.FormatLSN(state.commitLsn), err)
+			formatLSN(state.commitLsn), err)
 	}
 }
 
@@ -213,9 +213,9 @@ func (state *applyState) handleTruncate(v *pgoutput.Truncate) {
 	}
 
 	state.Debug(sql)
-	_, err := state.applyTx.Exec(sql)
+	_, err := state.applyTx.Exec(context.Background(), sql)
 	if err != nil {
 		state.Panicf("truncate failed, commit_lsn=%s, err=%+v",
-			pgx.FormatLSN(state.commitLsn), state.commitLsn, err)
+			formatLSN(state.commitLsn), state.commitLsn, err)
 	}
 }

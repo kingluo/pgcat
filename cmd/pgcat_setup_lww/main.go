@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -13,7 +14,8 @@ import (
 
 	"golang.org/x/net/proxy"
 
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v4"
 	"gopkg.in/yaml.v2"
 )
 
@@ -55,9 +57,9 @@ func execTemplate(t *template.Template, data *tableData, conn *pgx.Conn, dryRun 
 	t.Execute(&buf, data)
 	sql := buf.String()
 	if !dryRun {
-		_, err := conn.Exec(sql)
+		_, err := conn.Exec(context.Background(), sql)
 		if err != nil {
-			if pgErr, ok := err.(pgx.PgError); ok {
+			if pgErr, ok := err.(*pgconn.PgError); ok {
 				log.Fatalf("%#v", pgErr)
 			} else {
 				log.Fatal(err)
@@ -176,20 +178,23 @@ func main() {
 		}
 		log.Printf("%+v", lwwCfg)
 		for _, db := range lwwCfg.Databases {
-			connCfg := pgx.ConnConfig{
-				Host:     lwwCfg.Host,
-				Port:     lwwCfg.Port,
-				Database: db.Name,
-				User:     lwwCfg.User,
-				Password: lwwCfg.Password,
-				RuntimeParams: map[string]string{
-					"application_name": "pgcat",
-				},
-				Dial: func(network, addr string) (net.Conn, error) {
-					return dialer.Dial(network, addr)
-				},
+			cfg1, _ := pgx.ParseConfig("")
+			connCfg := *cfg1
+			cfg2, _ := pgconn.ParseConfig("")
+			cfg2.Host = lwwCfg.Host
+			cfg2.Port = lwwCfg.Port
+			cfg2.Database = db.Name
+			cfg2.User = lwwCfg.User
+			cfg2.Password = lwwCfg.Password
+			cfg2.RuntimeParams = map[string]string{
+				"application_name": "pgcat",
 			}
-			conn, err := pgx.Connect(connCfg)
+			cfg2.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.Dial(network, addr)
+			}
+			connCfg.Config = *cfg2
+
+			conn, err := pgx.ConnectConfig(context.Background(), &connCfg)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -197,7 +202,7 @@ func main() {
 			for _, table := range db.Tables {
 				var kind byte
 				var ident byte
-				row := conn.QueryRow(`select relkind, relreplident from pg_class
+				row := conn.QueryRow(context.Background(), `select relkind, relreplident from pg_class
 					where oid = $1::regclass`, table.Name)
 				err := row.Scan(&kind, &ident)
 				if err != nil {
@@ -206,7 +211,7 @@ func main() {
 				if kind != 'r' || (ident != 'd' && ident != 'i') {
 					log.Fatal("must be base table with pk or unique index as replica ident")
 				}
-				rows, err := conn.Query(fmt.Sprintf(getColsSQLStr, isMap[ident]), table.Name)
+				rows, err := conn.Query(context.Background(), fmt.Sprintf(getColsSQLStr, isMap[ident]), table.Name)
 				if err != nil {
 					log.Fatal(err)
 				}

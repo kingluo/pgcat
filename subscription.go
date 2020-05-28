@@ -1,9 +1,10 @@
 package pgcat
 
 import (
+	"context"
 	"regexp"
 
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v4"
 )
 
 type subscription struct {
@@ -25,8 +26,8 @@ type tableMapping struct {
 	regexp   *regexp.Regexp
 }
 
-func querySubscription(tx *pgx.Tx, name string) (*subscription, error) {
-	row := tx.QueryRow("select * from pgcat_subscription where name=$1", name)
+func querySubscription(tx pgx.Tx, name string) (*subscription, error) {
+	row := tx.QueryRow(context.Background(), "select * from pgcat_subscription where name=$1", name)
 	sub := &subscription{}
 	err := row.Scan(
 		&sub.Name,
@@ -43,7 +44,7 @@ func querySubscription(tx *pgx.Tx, name string) (*subscription, error) {
 		return nil, err
 	}
 
-	rows, err := tx.Query(`select priority, src, dst from pgcat_table_mapping
+	rows, err := tx.Query(context.Background(), `select priority, src, dst from pgcat_table_mapping
 			where subscription=$1 order by priority`, sub.Name)
 	if err != nil {
 		return nil, err
@@ -63,9 +64,9 @@ func querySubscription(tx *pgx.Tx, name string) (*subscription, error) {
 	return sub, nil
 }
 
-func querySubscriptions(tx *pgx.Tx) (map[string]*subscription, error) {
+func querySubscriptions(tx pgx.Tx) (map[string]*subscription, error) {
 	subscriptions := make(map[string]*subscription)
-	rows, err := tx.Query("select * from pgcat_subscription")
+	rows, err := tx.Query(context.Background(), "select * from pgcat_subscription")
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +94,7 @@ func querySubscriptions(tx *pgx.Tx) (map[string]*subscription, error) {
 	}
 
 	for _, sub := range subscriptions {
-		rows, err := tx.Query(`select priority, src, dst from pgcat_table_mapping
+		rows, err := tx.Query(context.Background(), `select priority, src, dst from pgcat_table_mapping
 			where subscription=$1 order by priority`, sub.Name)
 		if err != nil {
 			return nil, err

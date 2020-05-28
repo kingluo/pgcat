@@ -11,9 +11,12 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/log/zapadapter"
-	"github.com/jackc/pgx/pgtype"
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgproto3/v2"
+	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/log/zapadapter"
 	"github.com/kyleconroy/pgoutput"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -32,7 +35,7 @@ func (lsn *pgLSN) Scan(src interface{}) error {
 	case int64:
 		*lsn = pgLSN(val)
 	case string:
-		v, err := pgx.ParseLSN(val)
+		v, err := pglogrepl.ParseLSN(val)
 		if err != nil {
 			return err
 		}
@@ -44,17 +47,17 @@ func (lsn *pgLSN) Scan(src interface{}) error {
 	return nil
 }
 
-func (lsn *pgLSN) Value() (driver.Value, error) {
-	return pgx.FormatLSN(uint64(*lsn)), nil
+func formatLSN(lsn uint64) string {
+	return pglogrepl.LSN(lsn).String()
 }
 
-func pluginArgs(version string, publications []string) string {
-	return fmt.Sprintf(`"proto_version" '%s', "publication_names" '%s'`, version, strings.Join(publications, ","))
+func (lsn *pgLSN) Value() (driver.Value, error) {
+	return formatLSN(uint64(*lsn)), nil
 }
 
 func (state *applyState) sendFeedback(replyRequested bool) {
 	var flushLSN pgLSN
-	row := state.applyConn.QueryRow("select pg_current_wal_flush_lsn()")
+	row := state.applyConn.QueryRow(context.Background(), "select pg_current_wal_flush_lsn()")
 	if err := row.Scan(&flushLSN); err != nil {
 		state.Panic(err)
 	}
@@ -91,16 +94,15 @@ func (state *applyState) sendFeedback(replyRequested bool) {
 		"flushPos", flushPos,
 		"writePos", writePos,
 		"lastRecvPos", state.lastRecvPos)
-	k, err := pgx.NewStandbyStatus(flushPos, writePos, state.lastRecvPos)
-	if replyRequested {
-		k.ReplyRequested = 1
-	}
-	if err != nil {
-		state.Panicf("error creating status: %s", err)
-	}
 
-	if err := state.repConn.SendStandbyStatus(k); err != nil {
-		state.Panicf("error creating status: %s", err)
+	k := pglogrepl.StandbyStatusUpdate{
+		WALFlushPosition: pglogrepl.LSN(flushPos),
+		WALApplyPosition: pglogrepl.LSN(writePos),
+		WALWritePosition: pglogrepl.LSN(state.lastRecvPos),
+		ReplyRequested:   replyRequested}
+
+	if err := pglogrepl.SendStandbyStatusUpdate(context.Background(), state.repConn.PgConn(), k); err != nil {
+		state.Panicf("SendStandbyStatusUpdate: %s", err)
 	}
 
 	if writePos > state.lastWritePos {
@@ -140,8 +142,8 @@ type applyState struct {
 	commitLsn uint64
 
 	applyConn  *pgx.Conn
-	repConn    *pgx.ReplicationConn
-	applyTx    *pgx.Tx
+	repConn    *pgx.Conn
+	applyTx    pgx.Tx
 	slotName   string
 	originName string
 
@@ -159,14 +161,14 @@ type applyState struct {
 }
 
 func (state *applyState) setupOrigin() error {
-	tx, _ := state.applyConn.Begin()
+	tx, _ := state.applyConn.Begin(context.Background())
 	originName := state.sub.Name
 
 	if state.isSync {
 		originName = fmt.Sprintf("%s_sync_%d", state.sub.Name, state.relation.ID)
 	}
 
-	row := tx.QueryRow("select pgcat_replication_origin_oid($1) IS NULL", originName)
+	row := tx.QueryRow(context.Background(), "select pgcat_replication_origin_oid($1) IS NULL", originName)
 	var originNotExist bool
 	if err := row.Scan(&originNotExist); err != nil {
 		return errors.WithMessagef(err, "check origin failed, origin=%s", originName)
@@ -174,7 +176,7 @@ func (state *applyState) setupOrigin() error {
 
 	if originNotExist {
 		var oid pgtype.OID
-		row2 := tx.QueryRow("select pgcat_replication_origin_create($1)", originName)
+		row2 := tx.QueryRow(context.Background(), "select pgcat_replication_origin_create($1)", originName)
 		if err := row2.Scan(&oid); err != nil {
 			return errors.WithMessagef(err, "create origin failed, origin=%s", originName)
 		}
@@ -182,14 +184,18 @@ func (state *applyState) setupOrigin() error {
 
 	state.originName = originName
 
-	_, err := tx.Exec("select pgcat_replication_origin_session_setup($1)", originName)
+	_, err := tx.Exec(context.Background(), "select pgcat_replication_origin_session_setup($1)", originName)
 	if err != nil {
 		return errors.WithMessagef(err, "setup session origin, origin=%s", originName)
 	}
 
+	// register lsn type
+	typ := pgtype.DataType{Value: &pgtype.Int8{}, Name: "lsn", OID: 3220}
+	tx.Conn().ConnInfo().RegisterDataType(typ)
+
 	if !state.isSync {
 		var startLsn pgLSN
-		row := tx.QueryRow("select lsn from pgcat_subscription_progress where subscription=$1", state.sub.Name)
+		row := tx.QueryRow(context.Background(), "select lsn from pgcat_subscription_progress where subscription=$1", state.sub.Name)
 		if err := row.Scan(&startLsn); err != nil && err != pgx.ErrNoRows {
 			return err
 		}
@@ -197,7 +203,7 @@ func (state *applyState) setupOrigin() error {
 		state.Infof("start from lsn: %d", startLsn)
 	}
 
-	return tx.Commit()
+	return tx.Commit(context.Background())
 }
 
 const pgErrorDuplicateObject = "42710"
@@ -211,19 +217,19 @@ func (state *applyState) run() {
 	state.Debugw("start subscription")
 
 	// log notice
-	state.applyConnConfig.OnNotice = func(conn *pgx.Conn, notice *pgx.Notice) {
+	state.applyConnConfig.OnNotice = func(conn *pgconn.PgConn, notice *pgconn.Notice) {
 		state.Warnf("NOTICE: %+v", notice)
 	}
 
 	// create apply connection and setup origin
 	var err error
-	state.applyConn, err = pgx.Connect(state.applyConnConfig)
+	state.applyConn, err = pgx.ConnectConfig(context.Background(), &state.applyConnConfig)
 	if err != nil {
 		state.Panicw("connect failed", "err", err)
 	}
-	defer state.applyConn.Close()
+	defer state.applyConn.Close(context.Background())
 
-	if _, err := state.applyConn.Exec(
+	if _, err := state.applyConn.Exec(context.Background(),
 		"select pgcat_set_session_replication_role()"); err != nil {
 		state.Panic(err)
 	}
@@ -234,10 +240,10 @@ func (state *applyState) run() {
 
 	defer func() {
 		if state.isSync {
-			_, err := state.applyConn.Exec(
+			_, err := state.applyConn.Exec(context.Background(),
 				`select pgcat_replication_origin_session_reset()`)
 			if err != nil {
-				pgErr := err.(pgx.PgError)
+				pgErr := err.(*pgconn.PgError)
 				if pgErr.Code == pgErrorInFailedSQLTransaction {
 					state.Warnw("pgcat_replication_origin_session_reset failed",
 						"err", err)
@@ -246,7 +252,7 @@ func (state *applyState) run() {
 						"err", err)
 				}
 			} else {
-				_, err = state.applyConn.Exec(
+				_, err = state.applyConn.Exec(context.Background(),
 					`select pgcat_replication_origin_drop($1)`, state.originName)
 				if err != nil {
 					state.Panicw("remove temporary origin failed",
@@ -258,32 +264,36 @@ func (state *applyState) run() {
 
 	// start replication
 
-	state.repConnConfig = pgx.ConnConfig{
-		Host:     state.sub.Hostname,
-		Port:     state.sub.Port,
-		Database: state.sub.Dbname,
-		User:     state.sub.Username,
-		Password: state.sub.Password,
-		RuntimeParams: map[string]string{
-			"application_name": "pgcat",
-		},
-		Dial:     state.applyConnConfig.Dial,
-		Logger:   zapadapter.NewLogger(zap.L()),
-		LogLevel: state.applyConnConfig.LogLevel,
-		OnNotice: func(conn *pgx.Conn, notice *pgx.Notice) {
-			state.Warnf("replication NOTICE: %+v", notice)
-		},
+	repConnConfig, _ := pgx.ParseConfig("")
+	state.repConnConfig = *repConnConfig
+	cfg2, _ := pgconn.ParseConfig("")
+	cfg2.Host = state.sub.Hostname
+	cfg2.Port = state.sub.Port
+	cfg2.Database = state.sub.Dbname
+	cfg2.User = state.sub.Username
+	cfg2.Password = state.sub.Password
+	cfg2.RuntimeParams = map[string]string{
+		"application_name": "pgcat",
+		"replication":      "database",
 	}
+	cfg2.DialFunc = state.applyConnConfig.DialFunc
+	cfg2.OnNotice = func(conn *pgconn.PgConn, notice *pgconn.Notice) {
+		state.Warnf("replication NOTICE: %+v", notice)
+	}
+	state.repConnConfig.Config = *cfg2
+	state.repConnConfig.Logger = zapadapter.NewLogger(zap.L())
+	state.repConnConfig.LogLevel = state.applyConnConfig.LogLevel
+	state.repConnConfig.PreferSimpleProtocol = true
 
-	state.repConn, err = pgx.ReplicationConnect(state.repConnConfig)
+	state.repConn, err = pgx.ConnectConfig(context.Background(), &state.repConnConfig)
 	if err != nil {
 		state.Panic(err)
 	}
-	defer state.repConn.Close()
+	defer state.repConn.Close(context.Background())
 
 	typ := pgtype.DataType{Value: &pgtype.TextArray{}, Name: "_text", OID: 1009}
 
-	state.repConn.ConnInfo.RegisterDataType(typ)
+	state.repConn.ConnInfo().RegisterDataType(typ)
 
 	state.applyInfoList = new(applyInfo)
 	state.applyInfoList.prev = state.applyInfoList
@@ -295,9 +305,18 @@ func (state *applyState) run() {
 		}
 	} else {
 		state.slotName = state.sub.Name
-		err = state.repConn.CreateReplicationSlot(state.slotName, "pgcat")
+		_, err = pglogrepl.CreateReplicationSlot(
+			context.Background(),
+			state.repConn.PgConn(),
+			state.slotName,
+			"pgcat",
+			pglogrepl.CreateReplicationSlotOptions{
+				Temporary:      false,
+				SnapshotAction: "NOEXPORT_SNAPSHOT",
+				Mode:           pglogrepl.LogicalReplication,
+			})
 		if err != nil {
-			pgErr := err.(pgx.PgError)
+			pgErr := err.(*pgconn.PgError)
 			if pgErr.Code != pgErrorDuplicateObject {
 				state.Panic(pgErr)
 			}
@@ -310,8 +329,21 @@ func (state *applyState) run() {
 	}
 
 	state.Debugf("start replication, slot=%s, startPos=%d", state.slotName, state.startPos)
-	if err := state.repConn.StartReplication(state.slotName, state.startPos,
-		-1, pluginArgs("1", state.sub.Publications)); err != nil {
+	pluginArguments := []string{
+		"proto_version '1'",
+		fmt.Sprintf(`publication_names '%s'`, strings.Join(state.sub.Publications, ",")),
+	}
+	opts := pglogrepl.StartReplicationOptions{
+		Timeline:   -1,
+		Mode:       pglogrepl.LogicalReplication,
+		PluginArgs: pluginArguments,
+	}
+	if err := pglogrepl.StartReplication(
+		context.Background(),
+		state.repConn.PgConn(),
+		state.slotName,
+		pglogrepl.LSN(state.startPos),
+		opts); err != nil {
 		state.Panic(err)
 	}
 
@@ -339,17 +371,28 @@ func (state *applyState) run() {
 
 	repCloseCh := make(chan struct{})
 	defer close(repCloseCh)
-	repMsgCh := make(chan *pgx.ReplicationMessage, 100)
+	repMsgCh := make(chan *pgproto3.CopyData, 100)
+
+	// we do copy above, to get lastest lsn immediately,
+	// we send empty standby status to request heartbeat.
+	if state.isSync {
+		state.sendFeedback(true)
+	}
+	isKeepAliveCh := make(chan struct{})
 
 	repWg.Add(1)
 	go func() {
 		defer repWg.Done()
 		defer close(repMsgCh)
 		for {
-			msg, err := state.repConn.WaitForReplicationMessage(ctx)
-			if err == context.Canceled {
+			msg, err := state.repConn.PgConn().ReceiveMessage(ctx)
+
+			select {
+			case <-ctx.Done():
 				return
+			default:
 			}
+
 			if err != nil {
 				state.Panicf("%+v %+v", err, state)
 			}
@@ -359,25 +402,35 @@ func (state *applyState) run() {
 				continue
 			}
 
-			select {
-			case repMsgCh <- msg:
-			case <-repCloseCh:
-				return
+			switch msg := msg.(type) {
+			case *pgproto3.CopyData:
+				isKeepAlive := msg.Data[0] == pglogrepl.PrimaryKeepaliveMessageByteID
+
+				msg2 := *msg
+				select {
+				case repMsgCh <- &msg2:
+				case <-repCloseCh:
+					return
+				}
+
+				if isKeepAlive {
+					select {
+					case <-isKeepAliveCh:
+					case <-repCloseCh:
+						return
+					}
+				}
+			default:
+				state.Panicf("Received unexpected message: %#v\n", msg)
 			}
 		}
 	}()
-
-	// we do copy above, to get lastest lsn immediately,
-	// we send empty standby status to request heartbeat.
-	if state.isSync {
-		state.sendFeedback(true)
-	}
 
 	refreshPubTicker := time.NewTicker(3 * time.Minute)
 	defer refreshPubTicker.Stop()
 
 	for {
-		var repMsg *pgx.ReplicationMessage
+		var repMsg *pgproto3.CopyData
 
 		if !state.isSync && state.sub.CopyData && state.applyTx == nil {
 			select {
@@ -437,9 +490,14 @@ func (state *applyState) run() {
 			}
 		}
 
-		if walMsg := repMsg.WalMessage; walMsg != nil {
-			startLSN := walMsg.WalStart
-			endLSN := walMsg.ServerWalEnd
+		if repMsg.Data[0] == pglogrepl.XLogDataByteID {
+			walMsg, err := pglogrepl.ParseXLogData(repMsg.Data[1:])
+			if err != nil {
+				state.Errorf("ParseXLogData %+v", err)
+			}
+
+			startLSN := uint64(walMsg.WALStart)
+			endLSN := uint64(walMsg.ServerWALEnd)
 			if state.lastRecvPos < startLSN {
 				state.lastRecvPos = startLSN
 			}
@@ -447,7 +505,7 @@ func (state *applyState) run() {
 				state.lastRecvPos = endLSN
 			}
 
-			msg, err := pgoutput.Parse(walMsg.WalData)
+			msg, err := pgoutput.Parse(walMsg.WALData)
 			if err != nil {
 				state.Panic(err)
 			}
@@ -458,12 +516,12 @@ func (state *applyState) run() {
 				state.handleRelation(v)
 			case pgoutput.Begin:
 				state.commitLsn = v.LSN
-				state.Debugf("msg type=Begin, lsn=%d %+v", walMsg.WalStart, v)
+				state.Debugf("msg type=Begin, lsn=%d %+v", walMsg.WALStart, v)
 				if state.isSync {
 					continue
 				}
 
-				state.applyTx, err = state.applyConn.Begin()
+				state.applyTx, err = state.applyConn.Begin(context.Background())
 				if err != nil {
 					state.Panic(err)
 				}
@@ -486,7 +544,7 @@ func (state *applyState) run() {
 
 				// save progress
 				lsn := pgLSN(v.TransactionLSN)
-				if _, err := state.applyTx.Exec(
+				if _, err := state.applyTx.Exec(context.Background(),
 					`insert into pgcat_subscription_progress(subscription, lsn) values($1,$2)
 						on conflict(subscription) do update
 						set subscription=excluded.subscription, lsn=excluded.lsn`,
@@ -494,17 +552,17 @@ func (state *applyState) run() {
 					state.Panic(err)
 				}
 				// note that the lsn here is ReorderBufferTXN.end_lsn
-				if _, err := state.applyTx.Exec("select pgcat_replication_origin_xact_setup($1,$2)",
+				if _, err := state.applyTx.Exec(context.Background(), "select pgcat_replication_origin_xact_setup($1,$2)",
 					&lsn, v.Timestamp); err != nil {
 					state.Panic(err)
 				}
 
-				if err := state.applyTx.Commit(); err != nil {
+				if err := state.applyTx.Commit(context.Background()); err != nil {
 					state.Panic(err)
 				}
 				state.applyTx = nil
 
-				row := state.applyConn.QueryRow("select pg_current_wal_insert_lsn()")
+				row := state.applyConn.QueryRow(context.Background(), "select pg_current_wal_insert_lsn()")
 				var localLSN pgLSN
 				if err := row.Scan(&localLSN); err != nil {
 					state.Panic(err)
@@ -522,14 +580,14 @@ func (state *applyState) run() {
 			case pgoutput.Insert, pgoutput.Update, pgoutput.Delete:
 				if startLSN < state.startPos {
 					state.Warnf("skip dml due to progress advanced, confirm_lsn=%s, lsn=%s",
-						pgx.FormatLSN(state.startPos), pgx.FormatLSN(startLSN))
+						formatLSN(state.startPos), formatLSN(startLSN))
 					continue
 				}
 				state.handleDML(&msg)
 			case pgoutput.Truncate:
 				if startLSN < state.startPos {
 					state.Warnf("skip truncate due to progress advanced, confirm_lsn=%s, lsn=%s",
-						pgx.FormatLSN(state.startPos), pgx.FormatLSN(startLSN))
+						formatLSN(state.startPos), formatLSN(startLSN))
 					continue
 				}
 				state.Debugf("msg type=Truncate %+v", v)
@@ -539,13 +597,18 @@ func (state *applyState) run() {
 			}
 		}
 
-		if heartbeat := repMsg.ServerHeartbeat; heartbeat != nil {
+		if repMsg.Data[0] == pglogrepl.PrimaryKeepaliveMessageByteID {
+			heartbeat, err := pglogrepl.ParsePrimaryKeepaliveMessage(repMsg.Data[1:])
+			if err != nil {
+				state.Errorf("ParsePrimaryKeepaliveMessage %+v", err)
+			}
 			state.Debugw("Got heartbeat", "heartbeat", heartbeat)
-			endLSN := heartbeat.ServerWalEnd
+			endLSN := uint64(heartbeat.ServerWALEnd)
 			if state.lastRecvPos < endLSN {
 				state.lastRecvPos = endLSN
 			}
 			state.sendFeedback(false)
+			isKeepAliveCh <- struct{}{}
 
 			if state.isSync && state.lastRecvPos >= state.endPos {
 				state.syncDone()
@@ -588,6 +651,7 @@ func runSubscription(
 	return state
 }
 
+// DbRunState contains the state of RunDatabase
 type DbRunState struct {
 	*zap.SugaredLogger
 	PgxLogLevel       pgx.LogLevel
@@ -601,43 +665,46 @@ type DbRunState struct {
 	ClientMinMessages string
 }
 
+// RunDatabase runs all subscribers of the database
 func RunDatabase(state *DbRunState) {
 	defer close(state.StopCh)
 
 	state.Infow("run database")
 
 	dialer := proxy.FromEnvironment()
-	applyConnConfig := pgx.ConnConfig{
-		Host:     state.Host,
-		Port:     state.Port,
-		Database: state.DB,
-		User:     "pgcat",
-		Password: state.Password,
-		RuntimeParams: map[string]string{
-			"application_name": "pgcat",
-		},
-		Dial: func(network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		},
-		Logger:   zapadapter.NewLogger(zap.L()),
-		LogLevel: state.PgxLogLevel,
+
+	cfg1, _ := pgx.ParseConfig("")
+	applyConnConfig := *cfg1
+	cfg2, _ := pgconn.ParseConfig("")
+	cfg2.Host = state.Host
+	cfg2.Port = state.Port
+	cfg2.Database = state.DB
+	cfg2.User = "pgcat"
+	cfg2.Password = state.Password
+	cfg2.RuntimeParams = map[string]string{
+		"application_name": "pgcat",
 	}
+	cfg2.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialer.Dial(network, addr)
+	}
+	applyConnConfig.Config = *cfg2
+	applyConnConfig.Logger = zapadapter.NewLogger(zap.L())
+	applyConnConfig.LogLevel = state.PgxLogLevel
 
 	if state.ClientMinMessages != "" {
 		applyConnConfig.RuntimeParams["client_min_messages"] = state.ClientMinMessages
 	}
-
-	conn, err := pgx.Connect(applyConnConfig)
+	conn, err := pgx.ConnectConfig(context.Background(), &applyConnConfig)
 	if err != nil {
 		state.Panicw("connect failed", "err", err)
 	}
 
-	if err := conn.Listen("pgcat_cfg_changed"); err != nil {
+	if _, err := conn.Exec(context.Background(), "listen pgcat_cfg_changed"); err != nil {
 		state.Panic(err)
 	}
 
 	// run all subscriptions
-	tx, err := conn.Begin()
+	tx, err := conn.Begin(context.Background())
 	if err != nil {
 		state.Panic(err)
 	}
@@ -647,7 +714,7 @@ func RunDatabase(state *DbRunState) {
 		state.Panic(err)
 	}
 
-	err = tx.Commit()
+	err = tx.Commit(context.Background())
 	if err != nil {
 		state.Panic(err)
 	}
@@ -680,7 +747,9 @@ func RunDatabase(state *DbRunState) {
 		}
 
 		if err != nil {
-			if err != context.DeadlineExceeded {
+			select {
+			case <-ctx.Done():
+			default:
 				state.Panic(err)
 			}
 
@@ -713,7 +782,7 @@ func RunDatabase(state *DbRunState) {
 
 			switch cmd {
 			case "INSERT", "UPDATE":
-				tx, err := conn.Begin()
+				tx, err := conn.Begin(context.Background())
 				if err != nil {
 					state.Panic(err)
 				}
@@ -723,7 +792,7 @@ func RunDatabase(state *DbRunState) {
 					state.Panic(err)
 				}
 
-				err = tx.Commit()
+				err = tx.Commit(context.Background())
 				if err != nil {
 					state.Panic(err)
 				}

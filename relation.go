@@ -1,11 +1,12 @@
 package pgcat
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v4"
 	"github.com/kyleconroy/pgoutput"
 	"github.com/pkg/errors"
 )
@@ -67,14 +68,14 @@ func (state *applyState) mapTableName(sub *subscription, relation *relationState
 func doRelMap(localTable *localTableState, relation *relationState, applyConn *pgx.Conn) error {
 	if !localTable.localInSync {
 		var inSync bool
-		row := applyConn.QueryRow("select pgcat_check_table($1, $2)",
+		row := applyConn.QueryRow(context.Background(), "select pgcat_check_table($1, $2)",
 			relation.localNamespace, relation.localName)
 		if err := row.Scan(&inSync); err != nil {
 			return errors.Wrap(err, "pgcat_check_table failed")
 		}
 
 		if !inSync {
-			rows, err := applyConn.Query("select * from pgcat_get_table_columns($1, $2)",
+			rows, err := applyConn.Query(context.Background(), "select * from pgcat_get_table_columns($1, $2)",
 				relation.localNamespace, relation.localName)
 			if err != nil {
 				return err

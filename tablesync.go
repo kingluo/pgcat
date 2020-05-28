@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
+	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v4"
 	"github.com/kyleconroy/pgoutput"
 	"github.com/pkg/errors"
 )
@@ -59,7 +59,7 @@ const (
 func (state *applyState) syncDone() {
 	state.updateRelState("r", state.relation)
 
-	if err := state.applyTx.Commit(); err != nil {
+	if err := state.applyTx.Commit(context.Background()); err != nil {
 		state.Fatal(err)
 	}
 
@@ -74,7 +74,7 @@ func (state *applyState) syncDone() {
 
 func (state *applyState) updateRelState(st string, relState *relationState) {
 	fullName := fmt.Sprintf("%s.%s", relState.Namespace, relState.Name)
-	if _, err := state.applyTx.Exec(`insert into pgcat_subscription_rel(subscription,remotetable,localtable,state)
+	if _, err := state.applyTx.Exec(context.Background(), `insert into pgcat_subscription_rel(subscription,remotetable,localtable,state)
 values($1,$2,$3,$4) on conflict(subscription, remotetable, localtable) do update set state=excluded.state`,
 		state.sub.Name, fullName, relState.localFullName, st); err != nil {
 		state.Fatal(err)
@@ -84,12 +84,12 @@ values($1,$2,$3,$4) on conflict(subscription, remotetable, localtable) do update
 func (state *applyState) getOrInsertRelState(relState *relationState) {
 	fullName := fmt.Sprintf("%s.%s", relState.Namespace, relState.Name)
 	var st string
-	row := state.applyConn.QueryRow(`select state from pgcat_subscription_rel
+	row := state.applyConn.QueryRow(context.Background(), `select state from pgcat_subscription_rel
 					where subscription=$1 and remotetable=$2 and localtable=$3`,
 		state.sub.Name, fullName, relState.localFullName)
 	if err := row.Scan(&st); err != nil {
 		if err == pgx.ErrNoRows {
-			if _, err := state.applyConn.Exec(`insert into pgcat_subscription_rel
+			if _, err := state.applyConn.Exec(context.Background(), `insert into pgcat_subscription_rel
 (subscription, remotetable, localtable, state) values($1,$2,$3,'i')`,
 				state.sub.Name, fullName, relState.localFullName); err != nil {
 				state.Fatal(err)
@@ -115,17 +115,17 @@ func (state *applyState) populateRelations() {
 from pg_publication_tables, pg_attribute
 where pubname in (%s) and (schemaname || '.' || tablename)::regclass=attrelid
 and attnum >0 and attisdropped=false group by attrelid,schemaname,tablename`
-	tmpConn, err := pgx.ReplicationConnect(state.repConnConfig)
+	tmpConn, err := pgx.ConnectConfig(context.Background(), &state.repConnConfig)
 	if err != nil {
 		state.Panic(err)
 	}
-	defer tmpConn.Close()
+	defer tmpConn.Close(context.Background())
 
 	typ := pgtype.DataType{Value: &pgtype.TextArray{}, Name: "_text", OID: 1009}
 
-	tmpConn.ConnInfo.RegisterDataType(typ)
+	tmpConn.ConnInfo().RegisterDataType(typ)
 
-	rows, err := tmpConn.Query(fmt.Sprintf(getTablesSQL, pubList))
+	rows, err := tmpConn.Query(context.Background(), fmt.Sprintf(getTablesSQL, pubList))
 	if err != nil {
 		state.Panic(err)
 	}
@@ -165,21 +165,21 @@ and attnum >0 and attisdropped=false group by attrelid,schemaname,tablename`
 func (state *applyState) copyTable() bool {
 	// start local transaction
 	var err error
-	state.applyTx, err = state.applyConn.Begin()
+	state.applyTx, err = state.applyConn.Begin(context.Background())
 	if err != nil {
 		state.Fatal(err)
 	}
 
 	//start remote transaction
-	txOpts := &pgx.TxOptions{IsoLevel: "REPEATABLE READ", AccessMode: "READ ONLY"}
-	repTx, err := state.repConn.BeginEx(context.Background(), txOpts)
+	txOpts := pgx.TxOptions{IsoLevel: "REPEATABLE READ", AccessMode: "READ ONLY"}
+	repTx, err := state.repConn.BeginTx(context.Background(), txOpts)
 	if err != nil {
 		state.Fatal(err)
 	}
 
 	// create temporary slot and use current transaction snapshot
 	state.slotName = fmt.Sprintf("%s_sync_%d", state.sub.Name, state.relation.ID)
-	_, err = state.repConn.Exec(fmt.Sprintf(
+	_, err = state.repConn.Exec(context.Background(), fmt.Sprintf(
 		"CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s USE_SNAPSHOT", state.slotName, "pgcat"))
 	if err != nil {
 		state.Fatal(err)
@@ -192,11 +192,11 @@ func (state *applyState) copyTable() bool {
 	// However, remote lock hold only during copy command, because
 	// the replication stream starting from the slot snapshot would
 	// send relation update to us if any.
-	if _, err := repTx.Exec(fmt.Sprintf("LOCK TABLE %s.%s IN ACCESS SHARE MODE",
+	if _, err := repTx.Exec(context.Background(), fmt.Sprintf("LOCK TABLE %s.%s IN ACCESS SHARE MODE",
 		state.relation.Namespace, state.relation.Name)); err != nil {
 		state.Fatal(err)
 	}
-	row := repTx.QueryRow(fmt.Sprintf(`select array_agg(attname)::text[] from pg_attribute
+	row := repTx.QueryRow(context.Background(), fmt.Sprintf(`select array_agg(attname)::text[] from pg_attribute
 		where attrelid=%d and attnum >0 and attisdropped=false`, state.relation.ID))
 	rel := state.relation.Relation
 	// clear the columns
@@ -227,7 +227,7 @@ func (state *applyState) copyTable() bool {
 	}
 	colList := strings.Join(cols2, ",")
 	go func() {
-		_, err := repTx.CopyToWriter(copyHandler,
+		_, err := repTx.Conn().PgConn().CopyTo(context.Background(), copyHandler,
 			fmt.Sprintf("COPY %s.%s (%s) TO STDOUT",
 				state.relation.Namespace, state.relation.Name, colList))
 		if err != nil {
@@ -236,7 +236,7 @@ func (state *applyState) copyTable() bool {
 		close(copyHandler.ch)
 	}()
 
-	cpy, err := state.applyTx.CopyFromReader(copyHandler,
+	cpy, err := state.applyTx.Conn().PgConn().CopyFrom(context.Background(), copyHandler,
 		fmt.Sprintf("COPY %s (%s) FROM STDIN",
 			state.relation.localFullName, colList))
 	if err != nil {
@@ -245,7 +245,7 @@ func (state *applyState) copyTable() bool {
 	state.Infow("copy done", "result", cpy)
 
 	// commit the remote transaction
-	repTx.Commit()
+	repTx.Commit(context.Background())
 
 	// notify apply goroutine to wait for catching up
 	state.relation.state = relStateSyncCatchUp
