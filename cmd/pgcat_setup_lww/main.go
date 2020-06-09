@@ -181,6 +181,7 @@ func main() {
 			cfg1, _ := pgx.ParseConfig("")
 			connCfg := *cfg1
 			cfg2, _ := pgconn.ParseConfig("")
+			cfg2.Fallbacks = nil
 			cfg2.Host = lwwCfg.Host
 			cfg2.Port = lwwCfg.Port
 			cfg2.Database = db.Name

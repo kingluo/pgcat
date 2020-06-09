@@ -267,6 +267,7 @@ func (state *applyState) run() {
 	repConnConfig, _ := pgx.ParseConfig("")
 	state.repConnConfig = *repConnConfig
 	cfg2, _ := pgconn.ParseConfig("")
+	cfg2.Fallbacks = nil
 	cfg2.Host = state.sub.Hostname
 	cfg2.Port = state.sub.Port
 	cfg2.Database = state.sub.Dbname
@@ -676,6 +677,7 @@ func RunDatabase(state *DbRunState) {
 	cfg1, _ := pgx.ParseConfig("")
 	applyConnConfig := *cfg1
 	cfg2, _ := pgconn.ParseConfig("")
+	cfg2.Fallbacks = nil
 	cfg2.Host = state.Host
 	cfg2.Port = state.Port
 	cfg2.Database = state.DB
