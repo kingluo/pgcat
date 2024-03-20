@@ -35,10 +35,10 @@ the built-in logical replication of pg saves the progress in non-logged file.
 
 ## Architecture
 
-pgcat is based on logical decoding, and reuses the publication part and pgouput
+pgcat is based on logical decoding, and reuses the publication part and pgoutput
 output plugin of the pg built-in logical replication.
 
-Instead of worker processes and low-level row ingression, pgcat uses sql template
+Instead of worker processes and low-level row ingression, pgcat uses sql templates
 to apply high-level sql commands, so it could make largest compatibility on target
 table type. It is written in golang and runs in separate process.
 
@@ -55,7 +55,7 @@ golang >= 1.12
 
 [git-build-rpm](https://github.com/iovation/git-build-rpm)
 
-Assume you uses Centos/RedHat >= 7.0, you needs below rpm packages installed:
+Assume you use Centos/RedHat >= 7.0, you need the below RPM packages installed:
 
 ```
 postgresql11-devel-11.3-1PGDG.rhel7.x86_64
@@ -210,7 +210,7 @@ The pgcat would check `pgcat_subscription`, if it changes, pgcat would apply the
 ### Run pgcat
 
 ```bash
-mkdir /your/deploy/path
+mkdir -p /your/deploy/path
 cd /your/deploy/path
 cp -a /usr/share/pgcat/pgcat.yml .
 # modify pgcat.yml to fit your need
@@ -324,7 +324,7 @@ Conflict resolution is necessary for logical replication.
 Logical replication is normally used for loose-coupling different pg deployments
 (or different pg HA deployments, one HA deployment consists of one master and
 multiple slaves, where they are connected via physical replication),
-especially for different data centers, where does no require
+especially for different data centers, where it does not require
 real-time data consistence).
 
 For example, we have two groups of pg:
