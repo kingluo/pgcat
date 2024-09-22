@@ -3,13 +3,30 @@
 * [Why pgcat?](#why-pgcat)
 * [Architecture](#architecture)
 * [Build from source](#build-from-source)
-* [Install](#install)
 * [Run](#run)
 * [Conflict handling](#conflict-handling)
 * [Table mapping](#table-mapping)
 * [Replication identity](#replication-identity)
 * [Limitations](#limitations)
 * [Conflict resolution](#conflict-resolution)
+
+---
+
+Note that two things have changed in postgresql offical over the years since my last commit to pgcat:
+
+1. Since version 13:
+
+> Allow partitioned tables to be logically replicated via publications (Amit Langote)
+
+2. Since version 16:
+
+> Allow logical replication subscribers to process only changes that have no origin (Vignesh C, Amit Kapila)
+> 
+> This can be used to avoid replication loops. This is controlled by the new CREATE SUBSCRIPTION ... ORIGIN option.
+
+However, it doesn't cover all the features of pgcat, so pgcat is still meaningful.
+
+---
 
 ## Why pgcat?
 
@@ -51,59 +68,22 @@ pgcat has two parts, pgcat binary and postgresql extension.
 
 ### Dependencies
 
-golang >= 1.12
-
-[git-build-rpm](https://github.com/iovation/git-build-rpm)
-
-Assume you use Centos/RedHat >= 7.0, you need the below RPM packages installed:
-
-```
-postgresql11-devel-11.3-1PGDG.rhel7.x86_64
-```
+* golang >= 1.12
+* postgressql >= 11
 
 ### Build pgcat
 
 ```
-git build-rpm
-# check generated rpm, e.g. pgcat-0.1-11568289796.el7.x86_64.rpm
+cd cmd/pgcat
+go build
+cd ../pgcat_setup_lww
+go generate
+go build
 ```
 
 ### Build pgcat-pgxs
 
-```
-git clone https://github.com/kingluo/pgcat-pgxs
-cd pgcat-pgxs
-export PATH=$PATH:/usr/pgsql-11/bin/
-git build-rpm
-# check generated rpm, e.g. pgcat-pgxs-0.1-11562916936.el7.x86_64.rpm
-```
-
-## Install
-
-### Dependencies
-
-postgresql >= 11.
-
-```
-postgresql11-server-11.3-1PGDG.rhel7.x86_64
-postgresql11-11.3-1PGDG.rhel7.x86_64
-```
-
-### Install pgcat
-
-Install pgcat on individual machine whatever you want.
-
-```
-rpm -Uvh pgcat-0.1-11568289796.el7.x86_64.rpm
-```
-
-### Install pgcat-pgxs
-
-Install pgcat-pgxs on both the publisher and subscriber databases.
-
-```
-rpm -Uvh pgcat-pgxs-0.1-11562916936.el7.x86_64.rpm
-```
+https://github.com/kingluo/pgcat-pgxs
 
 ### Add pgcat user
 
@@ -195,9 +175,11 @@ If you need last-writer-win conflict resolution, then run `pgcat_setup_lww` on a
 pgcat_setup_lww -c lww.yml
 ```
 
-Check /usr/share/pgcat/lww.yml for configuration file example.
+Check [lww.yml](https://github.com/kingluo/pgcat/blob/master/cmd/pgcat_setup_lww/lww.yml) for configuration file example.
 
 #### Setup subscription
+
+On subscriber database:
 
 ```sql
 INSERT INTO pgcat.pgcat_subscription(name, hostname, port, username, password,
@@ -210,9 +192,7 @@ The pgcat would check `pgcat_subscription`, if it changes, pgcat would apply the
 ### Run pgcat
 
 ```bash
-mkdir -p /your/deploy/path
-cd /your/deploy/path
-cp -a /usr/share/pgcat/pgcat.yml .
+cd cmd/pgcat
 # modify pgcat.yml to fit your need
 pgcat -c pgcat.yml
 ```
