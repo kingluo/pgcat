@@ -12,7 +12,7 @@
 
 ---
 
-Note that two things have changed in postgresql offical over the years since my last commit to pgcat:
+Note that some facts have changed in postgresql offical over the years since my last commit to pgcat:
 
 1. Since version 13:
 
@@ -24,7 +24,15 @@ Note that two things have changed in postgresql offical over the years since my 
 > 
 > This can be used to avoid replication loops. This is controlled by the new CREATE SUBSCRIPTION ... ORIGIN option.
 
-However, it doesn't cover all the features of pgcat, so pgcat is still meaningful.
+3. Since version 17
+
+> Add logical replication failover control to CREATE/ALTER SUBSCRIPTION (Shveta Malik, Hou Zhijie, Ajin Cherian)
+
+https://www.postgresql.org/docs/17/logical-replication-failover.html
+
+> Allow partitioned tables to have identity columns (Ashutosh Bapat)
+
+**However, it doesn't cover all the features of pgcat, so pgcat is still meaningful.**
 
 ---
 
@@ -32,8 +40,8 @@ However, it doesn't cover all the features of pgcat, so pgcat is still meaningfu
 
 The built-in logicial replication has below shortages:
 
-* only support base table as replication target
-* do not filter any origin, which will cause bi-directional dead loop
+* only support base table as replication target (*also support paritioned table since postgresql 13*)
+* ~do not filter any origin, which will cause bi-directional dead loop~
 * could not do table name mapping
 * no conflict resolution
 
@@ -47,8 +55,8 @@ e.g. replicates data between two datacenter
 * table name mapping
 * optional lww (last-writer-win) conflict resolution
 * save replication progress in table, so that it would be logged
-when subscriber failovers, it would retain the progress. In contrast,
-the built-in logical replication of pg saves the progress in non-logged file.
+when subscriber failovers, it would retain the progress. ~In contrast,
+the built-in logical replication of pg saves the progress in non-logged file.~
 
 ## Architecture
 
